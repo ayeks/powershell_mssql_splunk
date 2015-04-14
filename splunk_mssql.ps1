@@ -8,7 +8,7 @@
             Adds Errorlogpath and Agentlogpath to inputs.conf
 
         .PARAMETER DirApp
-            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\TA-mssql_cit"
+            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\mssql"
         
         .PARAMETER SplunkIndex
             Splunk Inputs.conf Index. Default: "i_splunk_appl_mssql"
@@ -25,7 +25,7 @@
 Param (
     [parameter(ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True)]
     [Alias('__Server','DNSHostName','IPAddress')]
-    [string]$DirApp="C:\Program Files\SplunkUniversalForwarder\etc\apps\TA-mssql_cit",
+    [string]$DirApp="C:\Program Files\SplunkUniversalForwarder\etc\apps\mssql",
     [string]$SplunkIndex="i_splunk_appl_mssql",
     [string]$SplunkSourcetype="mssql_error"
     ) 
@@ -35,7 +35,7 @@ write-host ("Spluk App Directory: {0} Splunk Index: {1} Splunk Sourcetype: {2}" 
 $DirHome= $DirApp + "\default\"
 $DirInputs= $DirHome + "inputs.conf"
 $DirProps= $DirHome + "props.conf"
-$DisableDeletion = false # True if found Logpath is empty
+$DisableDeletion = 0 # True if found Logpath is empty
 
 Function Get-SQLInstance {  
     <#
@@ -218,8 +218,9 @@ Function Get-ErrorLogPath
     }
 
     write-host "Info: Get-ErrorLogPath: SQLServer: >" $instance  "< LogPath: >" $srv.Information.ErrorLogPath "<"       
-    if (-not($srv.Information.ErrorLogPath)) {
-        write-error "Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!" -RecommendedAction "Install Microsoft.SqlServer.Smo Assembly"
+    if ($srv.Information.ErrorLogPath -eq $null) {
+        write-verbose ("Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!")
+        write-verbose ("Disabled Config File Deletion")
         #Exit 1
         $DisableDeletion = 1 # disable Config File Deletion
     }
@@ -301,7 +302,7 @@ ForEach ($instance in $instances) {
     $addPathToList = 1
     #Check if Logpath is 
     Write-Verbose ("logPaths: {0}" -f $instLogPath)
-    if ( -not ($instLogPath.contains("Log"))) { # check empty logpath
+    if ( $instLogPath -eq $null) { # check empty logpath
             $addPathToList = 0
             $instancesToDelete.add($instance)
         }
@@ -321,8 +322,8 @@ ForEach ($instance in $instances) {
 
 # Remove unwanted instances because same ErrorPath as MainInstance
 ForEach($instance in $instancesToDelete) {
-    $instances.Remove($instance)
     Write-Verbose ("Info: Ignore Instance: {0} because duplicated ErrorPath" -f $instance)
+    $instances.Remove($instance)
 }
 
 # Remove old Splunk App Config
