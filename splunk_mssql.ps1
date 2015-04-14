@@ -8,7 +8,7 @@
             Adds Errorlogpath and Agentlogpath to inputs.conf
 
         .PARAMETER DirApp
-            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\mssql
+            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\TA-mssql_cit"
         
         .PARAMETER SplunkIndex
             Splunk Inputs.conf Index. Default: "i_splunk_appl_mssql"
@@ -25,7 +25,7 @@
 Param (
     [parameter(ValueFromPipeline=$True,ValueFromPipelineByPropertyName=$True)]
     [Alias('__Server','DNSHostName','IPAddress')]
-    [string]$DirApp="C:\Program Files\SplunkUniversalForwarder\etc\apps\mssql",
+    [string]$DirApp="C:\Program Files\SplunkUniversalForwarder\etc\apps\TA-mssql_cit",
     [string]$SplunkIndex="i_splunk_appl_mssql",
     [string]$SplunkSourcetype="mssql_error"
     ) 
@@ -35,6 +35,7 @@ write-host ("Spluk App Directory: {0} Splunk Index: {1} Splunk Sourcetype: {2}" 
 $DirHome= $DirApp + "\default\"
 $DirInputs= $DirHome + "inputs.conf"
 $DirProps= $DirHome + "props.conf"
+$DisableDeletion = false # True if found Logpath is empty
 
 Function Get-SQLInstance {  
     <#
@@ -206,7 +207,6 @@ Function Get-ErrorLogPath
             $instance = $SQLServer.ClusterName
             $srv = new-object ("Microsoft.SqlServer.Management.Smo.Server") $instance 
         }
-
     } else {
         write-verbose ("Use Computer Name")
         if($SQLServer.SQLInstance -eq "MSSQLSERVER") { # default instance
@@ -217,14 +217,54 @@ Function Get-ErrorLogPath
         $srv = new-object ("Microsoft.SqlServer.Management.Smo.Server") $instance 
     }
 
-
     write-host "Info: Get-ErrorLogPath: SQLServer: >" $instance  "< LogPath: >" $srv.Information.ErrorLogPath "<"       
     if (-not($srv.Information.ErrorLogPath)) {
         write-error "Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!" -RecommendedAction "Install Microsoft.SqlServer.Smo Assembly"
-        Exit 1
+        #Exit 1
+        $DisableDeletion = 1 # disable Config File Deletion
     }
     $srv.Information.ErrorLogPath
 } #end function Get-ErrorLogPath
+
+Function parse_ini {
+    <#
+    .SYNOPSIS
+        Parse ini files
+
+    .DESCRIPTION
+        Parses ini files to iterable structure
+
+    .PARAMETER file
+        file to parse
+
+    .EXAMPLE
+        PS> $links = parse_ini links.ini
+        PS> $links["search-engines"]["link1"]
+            http://www.google.com
+        PS> $links["vendors"]["link1"]
+            http://www.apple.com
+        
+        Ini Structure:
+            [vendors]
+            link1=http://www.apple.com
+            [search-engines]
+            link1=http://www.google.com
+    #>
+    param($file)
+    $ini = @{}
+    switch -regex -file $file
+    {
+        "^\[(.+)\]$" {
+            $section = $matches[1]
+            $ini[$section] = @{}
+        }
+        "(.+)=(.+)" {
+            $name,$value = $matches[1..2]
+            $ini[$section][$name] = $value
+        }
+    }
+} # end function parse_ini
+
 
 # Include SMO Assembly
 try {
@@ -258,17 +298,22 @@ $instances = Get-SQLInstance -Verbose
 ForEach ($instance in $instances) {
     Write-Verbose ("ForEach instance: {0}" -f $instance)
     $instLogPath=Get-ErrorLogPath -SQLSERVER $instance 
-    #Check if Logpath is allready in list
+    $addPathToList = 1
+    #Check if Logpath is 
     Write-Verbose ("logPaths: {0}" -f $instLogPath)
-    $pathInList = 0
+    if ( -not ($instLogPath.contains("Log"))) { # check empty logpath
+            $addPathToList = 0
+            $instancesToDelete.add($instance)
+        }
+    #Check if Logpath is allready in list
     ForEach ($curLogPath in $logPaths) {
-        if ($curLogPath -eq $instLogPath) {
-            $pathInList = 1
+        if ($curLogPath -eq $instLogPath) { # check duplicated logpath
+            $addPathToList = 0
             $instancesToDelete.add($instance)
         }
     }     
-    #Add Path to List
-    if (-not $pathInList) {     
+    #Add Path to List if not allready in list
+    if ($addPathToList) {     
         Write-Verbose "Add Path To List: " 
         $logPaths+=$instLogPath
     }
@@ -280,16 +325,21 @@ ForEach($instance in $instancesToDelete) {
     Write-Verbose ("Info: Ignore Instance: {0} because duplicated ErrorPath" -f $instance)
 }
 
-# Remove Splunk App Config
+# Remove old Splunk App Config
 Write-Verbose "Remove Old Config Files.."
-try{ 
-    if(Test-Path $DirHome){ # remove path if exists
-        Remove-Item  -Force -confirm:$false -Recurse $DirApp
-        write-verbose ("Removed Dir: {0}" -f $DirApp)
+if (-not($DisableDeletion)) {
+    try{ 
+        if(Test-Path $DirHome){ # remove path if exists
+            Remove-Item  -Force -confirm:$false -Recurse $DirApp
+            write-verbose ("Removed Dir: {0}" -f $DirApp)
+        }
+    } catch {
+        write-error "Cant delete directory: " $DirApp -RecommendedAction "Run script as admin"
     }
-}
-catch{
-    write-error "Cant delete directory: " $DirApp -RecommendedAction "Run script as admin"
+} else {
+    write-verbose ("Logfile deletion disabled.")
+    # parse ini for check if logpath is allready in file
+    $ParsedInputs = parse_ini($DirInputs)
 }
 
 # Create Folder and Config Files if directy is deleted
@@ -309,11 +359,21 @@ if(-NOT (Test-Path $DirHome)){
  
     # Add inputs.conf Content
     Write-Verbose ("Write Inputs.conf")
+
     $logPathNum = 0
     ForEach ($instance in $instances) {
         Write-Verbose ("Write Instance: {0}" -f $instance)
         # Add Monitor Path
-        $monitorPath= "[monitor://"+ $logPaths[$logPathNum]+"\ERRORLOG]"    
+        $monitorPath= "[monitor://"+ $logPaths[$logPathNum]+"\ERRORLOG]"
+        # If Logfiledeletion disabled Check if Path is allready in Logfile
+        if ($DisableDeletion) {
+            if ($ParsedInputs[$monitorPath]) {
+                # exit current iteration because path is in logfile
+                Write-Verbose ("Monitorpath {0} allready in Logfile. " -f $monitorPath)
+                $logPathNum++
+                Continue
+            }
+        }
         Add-content $DirInputs $monitorPath
         Add-content $DirInputs "disabled=false"          
         Add-content $DirInputs ("index=" + $SplunkIndex)
@@ -338,7 +398,9 @@ if(-NOT (Test-Path $DirHome)){
         if ($instance.isCluster) {
             Add-content $DirInputs ("host="+$instance.ClusterName)
         }       
-
         $logPathNum++
     }
 }
+
+# Restart Splunk SplunkForwarder
+Restart-Service "SplunkForwarder Service"
