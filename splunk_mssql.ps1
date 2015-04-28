@@ -5,16 +5,19 @@
         .DESCRIPTION
             Retrieves SQL server information and writes Splunk Config in predefined Dirs.
             Works with multiple instances on one server or cluster.
-            Adds Errorlogpath and Agentlogpath to inputs.conf
+            Adds Errorlogpath and Agentlogpath to inputs.conf and restarts Splunk Forwarder.
 
         .PARAMETER DirApp
-            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\mssql"
+            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\TA-mssql_cit"
         
         .PARAMETER SplunkIndex
             Splunk Inputs.conf Index. Default: "i_splunk_appl_mssql"
 
         .PARAMETER SplunkSourcetype
             Splunk Inputs.conf Sourcetype. Default: "mssql_error"
+        
+        .PARAMETER verbose
+            Generates many info messages.
 
         .NOTES
             Name: Splunk_MSSQL
@@ -31,11 +34,11 @@ Param (
     ) 
 
 # Splunk Config File Paths
-write-host ("Spluk App Directory: {0} Splunk Index: {1} Splunk Sourcetype: {2}" -f $DirApp, $SplunkIndex, $SplunkSourcetype)
+Write-Verbose ("Spluk App Directory: {0} Splunk Index: {1} Splunk Sourcetype: {2}" -f $DirApp, $SplunkIndex, $SplunkSourcetype)
 $DirHome= $DirApp + "\default\"
 $DirInputs= $DirHome + "inputs.conf"
 $DirProps= $DirHome + "props.conf"
-$DisableDeletion = 0 # True if found Logpath is empty
+$global:DisableDeletion = 0 # True if Logpath is empty
 
 Function Get-SQLInstance {  
     <#
@@ -191,8 +194,7 @@ Function Get-SQLInstance {
 } #end function Get-SQLInstance
 
 
-Function Get-ErrorLogPath
-{
+Function Get-ErrorLogPath {
     Param([PSObject]$SQLServer = "(local)")
     $instance = ""
     if ($SQLServer.isCluster) { 
@@ -216,56 +218,20 @@ Function Get-ErrorLogPath
         }
         $srv = new-object ("Microsoft.SqlServer.Management.Smo.Server") $instance 
     }
-
-    write-host "Info: Get-ErrorLogPath: SQLServer: >" $instance  "< LogPath: >" $srv.Information.ErrorLogPath "<"       
-    if ($srv.Information.ErrorLogPath -eq $null) {
-        write-verbose ("Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!")
-        write-verbose ("Disabled Config File Deletion")
-        #Exit 1
-        $DisableDeletion = 1 # disable Config File Deletion
-    }
+    write-verbose "Info: Get-ErrorLogPath: SQLServer: >{0}< LogPath: >" $srv.Information.ErrorLogPath "<" -f  $instance       
+    try {
+        if ( -NOT ($srv.Information.ErrorLogPath -match "\")) {
+            write-verbose ("Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!")
+            write-verbose ("Disabled Config File Deletion")
+            $global:DisableDeletion = 1 # disable Config File Deletion
+        }
+    } catch {
+            write-verbose ("Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!")
+            write-verbose ("Disabled Config File Deletion")
+            $global:DisableDeletion = 1 # disable Config File Deletion
+        }
     $srv.Information.ErrorLogPath
 } #end function Get-ErrorLogPath
-
-Function parse_ini {
-    <#
-    .SYNOPSIS
-        Parse ini files
-
-    .DESCRIPTION
-        Parses ini files to iterable structure
-
-    .PARAMETER file
-        file to parse
-
-    .EXAMPLE
-        PS> $links = parse_ini links.ini
-        PS> $links["search-engines"]["link1"]
-            http://www.google.com
-        PS> $links["vendors"]["link1"]
-            http://www.apple.com
-        
-        Ini Structure:
-            [vendors]
-            link1=http://www.apple.com
-            [search-engines]
-            link1=http://www.google.com
-    #>
-    param($file)
-    $ini = @{}
-    switch -regex -file $file
-    {
-        "^\[(.+)\]$" {
-            $section = $matches[1]
-            $ini[$section] = @{}
-        }
-        "(.+)=(.+)" {
-            $name,$value = $matches[1..2]
-            $ini[$section][$name] = $value
-        }
-    }
-} # end function parse_ini
-
 
 # Include SMO Assembly
 try {
@@ -293,7 +259,7 @@ $instancesToDelete = New-Object System.Collections.ArrayList
 
 # Get all instances
 #$instances = Get-SQLInstance -ComputerName $Computernames -Verbose
-$instances = Get-SQLInstance -Verbose
+$instances = Get-SQLInstance
 
 # iterate through instances
 ForEach ($instance in $instances) {
@@ -305,12 +271,14 @@ ForEach ($instance in $instances) {
     if ( $instLogPath -eq $null) { # check empty logpath
             $addPathToList = 0
             $instancesToDelete.add($instance)
+            Write-Verbose ("Add empty instance on deletionList: {0}" -f $instance)
         }
     #Check if Logpath is allready in list
     ForEach ($curLogPath in $logPaths) {
         if ($curLogPath -eq $instLogPath) { # check duplicated logpath
             $addPathToList = 0
             $instancesToDelete.add($instance)
+            Write-Verbose ("Add duplicated instance on deletionList: {0}" -f $instance)
         }
     }     
     #Add Path to List if not allready in list
@@ -322,13 +290,21 @@ ForEach ($instance in $instances) {
 
 # Remove unwanted instances because same ErrorPath as MainInstance
 ForEach($instance in $instancesToDelete) {
-    Write-Verbose ("Info: Ignore Instance: {0} because duplicated ErrorPath" -f $instance)
-    $instances.Remove($instance)
+    Try {
+        Write-Verbose ("Remove instance: {0}" -f $instance)
+        $instances.Remove($instance) #TODO: TryCatch da manchmal nicht als array initialisiert wenn nur ein Objekt enthalten. Prüfen wie sich das bei Problemservern verhält.
+    } catch {
+        Write-Verbose "Set instances to null. "
+        $instances = $null
+        # no instances with logpath exist. exit here with Exit1
+        write-error ("No instances with logpath found. No file was edited. Exiting.")
+        Exit 1
+    }
 }
 
 # Remove old Splunk App Config
-Write-Verbose "Remove Old Config Files.."
-if (-not($DisableDeletion)) {
+if ($global:DisableDeletion -eq 0) {
+    Write-Verbose "Remove Old Config Files.."
     try{ 
         if(Test-Path $DirHome){ # remove path if exists
             Remove-Item  -Force -confirm:$false -Recurse $DirApp
@@ -336,11 +312,12 @@ if (-not($DisableDeletion)) {
         }
     } catch {
         write-error "Cant delete directory: " $DirApp -RecommendedAction "Run script as admin"
+        Exit 1
     }
 } else {
     write-verbose ("Logfile deletion disabled.")
     # parse ini for check if logpath is allready in file
-    $ParsedInputs = parse_ini($DirInputs)
+    $InputsContent = Get-Content $DirInputs
 }
 
 # Create Folder and Config Files if directy is deleted
@@ -362,19 +339,28 @@ if(-NOT (Test-Path $DirHome)){
     Write-Verbose ("Write Inputs.conf")
 
     $logPathNum = 0
-    ForEach ($instance in $instances) {
+    ForEach ($instance in $instances) { # go through found instances
         Write-Verbose ("Write Instance: {0}" -f $instance)
-        # Add Monitor Path
         $monitorPath= "[monitor://"+ $logPaths[$logPathNum]+"\ERRORLOG]"
-        # If Logfiledeletion disabled Check if Path is allready in Logfile
-        if ($DisableDeletion) {
-            if ($ParsedInputs[$monitorPath]) {
+
+        # If Logfiledeletion disabled check if path is allready in Logfile or null
+        if ($global:DisableDeletion) {
+            if ($InputsContent | Select-String $instance.SQLInstance) { # search SQLInstance name
                 # exit current iteration because path is in logfile
-                Write-Verbose ("Monitorpath {0} allready in Logfile. " -f $monitorPath)
+                Write-Verbose ("Monitorpath {0} allready in Inputfile. " -f $monitorPath)
                 $logPathNum++
                 Continue
+            } else { # path is not allready in logfile, check if logpath != 0
+                write-verbose ("Logpath >{0}< is not in Inputfile." -f $logPaths[$logPathNum])
+                if ($logPaths[$logPathNum] -eq $null) {
+                    # exit because no logpath in logfile
+                    write-error ("Errorlogpath not in Inputfile, and not in registry. Exiting.")
+                    Exit 1
+                }
+                #TODO: maybe here is some redundancy. should be debugged..
             }
         }
+
         Add-content $DirInputs $monitorPath
         Add-content $DirInputs "disabled=false"          
         Add-content $DirInputs ("index=" + $SplunkIndex)
