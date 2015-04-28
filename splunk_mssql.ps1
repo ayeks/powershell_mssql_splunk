@@ -8,7 +8,7 @@
             Adds Errorlogpath and Agentlogpath to inputs.conf and restarts Splunk Forwarder.
 
         .PARAMETER DirApp
-            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\TA-mssql_cit"
+            Directory to Splunk MSSQL App. Content will be deletet. Default path: "C:\Program Files\SplunkUniversalForwarder\etc\apps\mssql"
         
         .PARAMETER SplunkIndex
             Splunk Inputs.conf Index. Default: "i_splunk_appl_mssql"
@@ -218,14 +218,14 @@ Function Get-ErrorLogPath {
         }
         $srv = new-object ("Microsoft.SqlServer.Management.Smo.Server") $instance 
     }
-    write-verbose "Info: Get-ErrorLogPath: SQLServer: >{0}< LogPath: >" $srv.Information.ErrorLogPath "<" -f  $instance       
+    write-verbose ("Info: Get-ErrorLogPath: SQLServer: >{0}< LogPath: >{1}<" -f  $instance, $srv.Information.ErrorLogPath)     
     try {
         if ( -NOT ($srv.Information.ErrorLogPath -match "\")) {
             write-verbose ("Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!")
             write-verbose ("Disabled Config File Deletion")
             $global:DisableDeletion = 1 # disable Config File Deletion
         }
-    } catch {
+    } catch { # isnt pretty but it works..
             write-verbose ("Can't get ErrorLogPath! Propably because of missing Assembly or inactive Clusternode!")
             write-verbose ("Disabled Config File Deletion")
             $global:DisableDeletion = 1 # disable Config File Deletion
@@ -254,11 +254,9 @@ $instances = New-Object System.Collections.ArrayList
 
 $logPaths = @()
 # Get Default Instance Log Path
-# $logPaths+=Get-ErrorLogPath -SQLSERVER "." #TODO: Check if Default Instance is in list when outcommented
 $instancesToDelete = New-Object System.Collections.ArrayList    
 
 # Get all instances
-#$instances = Get-SQLInstance -ComputerName $Computernames -Verbose
 $instances = Get-SQLInstance
 
 # iterate through instances
@@ -292,11 +290,9 @@ ForEach ($instance in $instances) {
 ForEach($instance in $instancesToDelete) {
     Try {
         Write-Verbose ("Remove instance: {0}" -f $instance)
-        $instances.Remove($instance) #TODO: TryCatch da manchmal nicht als array initialisiert wenn nur ein Objekt enthalten. Prüfen wie sich das bei Problemservern verhält.
-    } catch {
-        Write-Verbose "Set instances to null. "
-        $instances = $null
-        # no instances with logpath exist. exit here with Exit1
+        $instances.Remove($instance) 
+    } catch { #instances not an array if it contains only 1 element, so catch the case
+        # no instances with logpath exist. exit here with Exit 1
         write-error ("No instances with logpath found. No file was edited. Exiting.")
         Exit 1
     }
